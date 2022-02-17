@@ -1142,40 +1142,48 @@ int trace_ret_listen(struct pt_regs *ctx)
 }
 
 
+
+#define READ_KERN(ptr)                                                  \
+    ({                                                                  \
+        typeof(ptr) _val;                                               \
+        __builtin_memset((void *)&_val, 0, sizeof(_val));               \
+        bpf_probe_read((void *)&_val, sizeof(_val), &ptr);               \
+        _val;                                                           \
+    })
+
 static __always_inline dev_t get_dev_from_file(struct file *file)
 {   
-    struct inode *f_inode = file->f_inode;
-    struct super_block *i_sb = f_inode->i_sb;
-    return i_sb->s_dev;
+    struct inode *f_inode = READ_KERN(file->f_inode);
+    struct super_block *i_sb = READ_KERN(f_inode->i_sb);
+    return READ_KERN(i_sb->s_dev);
 }   
 
 static __always_inline unsigned long get_inode_nr_from_file(struct file *file)
 {
-    struct inode *f_inode = file->f_inode;
-    return f_inode->i_ino;
+    struct inode *f_inode = READ_KERN(file->f_inode);
+    return READ_KERN(f_inode->i_ino);
 }
 
 static __always_inline struct qstr get_d_name_from_dentry(struct dentry *dentry)
 {
-    return dentry->d_name;
+    return READ_KERN(dentry->d_name);
 }
 
 static __always_inline struct file* get_file_ptr_from_bprm(struct linux_binprm *bprm)
 {
-    return bprm->file;
-
+    return READ_KERN(bprm->file);
 }
 
 #define GET_FIELD_ADDR(field) __builtin_preserve_access_index(&field)
 
 static __always_inline struct dentry* get_mnt_root_ptr_from_vfsmnt(struct vfsmount *vfsmnt)
 {
-	return vfsmnt->mnt_root;
+	return READ_KERN(vfsmnt->mnt_root);
 }
 
 static __always_inline struct dentry* get_d_parent_ptr_from_dentry(struct dentry *dentry)
 {
-	return dentry->d_parent;
+	return READ_KERN(dentry->d_parent);
 }
 
 #define MAX_PATH_SZ 32
@@ -1255,14 +1263,10 @@ static __always_inline void get_path_str(struct path *path)//, char *filename, i
 		}
         dentry = d_parent;
     }
-
-string ans="";
 #pragma unroll
 	for (pcidx++;pcidx<MAX_PATH_COMPONENTS;pcidx++) {
-		// bpf_trace_printk("part=%s\n", pc[pcidx]);
-        ans += pc[pcidx];
-    }
-    bpf_trace_printk("%s\n",ans);
+		bpf_printk("%s/", pc[pcidx]);
+	}
 }
 
 // == LSM Hooks == //
