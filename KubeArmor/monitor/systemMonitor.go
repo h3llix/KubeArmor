@@ -400,7 +400,7 @@ func (mon *SystemMonitor) InitBPF() error {
 			return fmt.Errorf("error attaching kprobe")
 		}
 
-		tracepoints := []string{"do_exit"}
+		tracepoints := []string{"security_bprm_check", "do_exit"}
 
 		for _, tracepoint := range tracepoints {
 			kp, err := mon.HostBpfModule.LoadKprobe(fmt.Sprintf("trace_%s", tracepoint))

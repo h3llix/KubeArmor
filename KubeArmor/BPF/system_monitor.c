@@ -28,6 +28,7 @@
 #include <linux/pid_namespace.h>
 #include <linux/proc_ns.h>
 #include <linux/mount.h>
+#include <linux/binfmts.h>
 
 #include <linux/un.h>
 #include <net/inet_sock.h>
@@ -723,7 +724,6 @@ int syscall__execve(struct pt_regs *ctx,
         return 0;
 
     init_context(&context);
-
     context.event_id = _SYS_EXECVE;
     context.argnum = 2;
     context.retval = 0;
@@ -979,7 +979,6 @@ int syscall__open(struct pt_regs *ctx)
 {
     if (skip_syscall())
         return 0;
-
     return save_args(_SYS_OPEN, ctx);
 }
 
@@ -1140,4 +1139,137 @@ int syscall__listen(struct pt_regs *ctx)
 int trace_ret_listen(struct pt_regs *ctx)
 {
     return trace_ret_generic(_SYS_LISTEN, ctx, ARG_TYPE0(INT_T)|ARG_TYPE1(INT_T));
+}
+
+
+static __always_inline dev_t get_dev_from_file(struct file *file)
+{   
+    struct inode *f_inode = file->f_inode;
+    struct super_block *i_sb = f_inode->i_sb;
+    return i_sb->s_dev;
+}   
+
+static __always_inline unsigned long get_inode_nr_from_file(struct file *file)
+{
+    struct inode *f_inode = file->f_inode;
+    return f_inode->i_ino;
+}
+
+static __always_inline struct qstr get_d_name_from_dentry(struct dentry *dentry)
+{
+    return dentry->d_name;
+}
+
+static __always_inline struct file* get_file_ptr_from_bprm(struct linux_binprm *bprm)
+{
+    return bprm->file;
+
+}
+
+#define GET_FIELD_ADDR(field) __builtin_preserve_access_index(&field)
+
+static __always_inline struct dentry* get_mnt_root_ptr_from_vfsmnt(struct vfsmount *vfsmnt)
+{
+	return vfsmnt->mnt_root;
+}
+
+static __always_inline struct dentry* get_d_parent_ptr_from_dentry(struct dentry *dentry)
+{
+	return dentry->d_parent;
+}
+
+#define MAX_PATH_SZ 32
+#define MAX_PATH_COMPONENTS 10
+
+static inline int copystr(char *dst, char *src, int len) {
+	int c=0;
+#pragma unroll
+	for (;;c++) {
+		if(c>=len) break;
+		if(!src[c]) break;
+		dst[c] = src[c];
+	}
+	return c;
+}
+
+static __always_inline void get_path_str(struct path *path)//, char *filename, int max_len)
+{
+    struct path f_path;
+    bpf_probe_read(&f_path, sizeof(struct path), path);
+    char slash = '/';
+    int zero = 0;
+    struct dentry *dentry = f_path.dentry;
+    struct vfsmount *vfsmnt = f_path.mnt;
+    struct mount *mnt_parent_p;
+
+    struct mount *mnt_p = real_mount(vfsmnt);
+    bpf_probe_read(&mnt_parent_p, sizeof(struct mount*), &mnt_p->mnt_parent);
+
+    struct dentry *mnt_root;
+    struct dentry *d_parent;
+    struct qstr d_name;
+    unsigned int len;
+    int sz;
+	char pc[MAX_PATH_COMPONENTS][MAX_PATH_SZ];
+	char filename[128];
+	int off = 0;
+	int pcidx = MAX_PATH_COMPONENTS - 1;
+
+    #pragma unroll
+    for (int i = 0; i < MAX_PATH_COMPONENTS; i++) {
+        mnt_root = get_mnt_root_ptr_from_vfsmnt(vfsmnt);
+        d_parent = get_d_parent_ptr_from_dentry(dentry);
+        if (dentry == mnt_root || dentry == d_parent) {
+            if (dentry != mnt_root) {
+                // We reached root, but not mount root - escaped?
+                break;
+            }
+            if (mnt_p != mnt_parent_p) {
+                // We reached root, but not global root - continue with mount point path
+                bpf_probe_read(&dentry, sizeof(struct dentry*), &mnt_p->mnt_mountpoint);
+                bpf_probe_read(&mnt_p, sizeof(struct mount*), &mnt_p->mnt_parent);
+                bpf_probe_read(&mnt_parent_p, sizeof(struct mount*), &mnt_p->mnt_parent);
+                vfsmnt = &mnt_p->mnt;
+                continue;
+            }
+            // Global root - path fully parsed
+            break;
+        }
+        // Add this dentry name to path
+        d_name = get_d_name_from_dentry(dentry);
+        len = (d_name.len+1) & (MAX_PATH_SZ-1);
+
+		if (pcidx < 0) {
+			break;
+		}
+
+        // Is string buffer big enough for dentry name?
+        sz = 0;
+		if (len < sizeof(pc[pcidx])) {
+            bpf_probe_read(pc[pcidx], 1, &slash);
+			sz = bpf_probe_read_str(&pc[pcidx][1], sizeof(pc[pcidx]), (void *)d_name.name);
+			if(sz > 1)
+				pcidx--;
+			else
+				break;
+		}
+        dentry = d_parent;
+    }
+
+string ans="";
+#pragma unroll
+	for (pcidx++;pcidx<MAX_PATH_COMPONENTS;pcidx++) {
+		// bpf_trace_printk("part=%s\n", pc[pcidx]);
+        ans += pc[pcidx];
+    }
+    bpf_trace_printk("%s\n",ans);
+}
+
+// == LSM Hooks == //
+int trace_security_bprm_check(struct pt_regs *ctx){
+    bpf_trace_printk("Enter hook\n");
+    struct linux_binprm* bprm = (struct linux_binprm *)PT_REGS_PARM1(ctx);
+    struct file* file = get_file_ptr_from_bprm(bprm);
+    get_path_str(GET_FIELD_ADDR(file->f_path));
+    return 0;
 }

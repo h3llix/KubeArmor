@@ -691,7 +691,7 @@ func (fd *Feeder) UpdateMatchedPolicy(log tp.Log) tp.Log {
 	allowNetworkMessage := ""
 
 	mightBeNative := false
-
+	
 	if log.Result == "Passed" || log.Result == "Operation not permitted" || log.Result == "Permission denied" {
 		fd.SecurityPoliciesLock.RLock()
 
